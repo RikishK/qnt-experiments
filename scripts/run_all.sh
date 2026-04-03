@@ -32,10 +32,9 @@ echo "Configs:  $CONFIGS"
 echo "========================================="
 echo ""
 
-# Activate venv if exists
-if [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
-fi
+# Activate conda env
+eval "$(conda shell.bash hook)"
+conda activate qnt
 
 # --- Phase 1: Baseline ---
 if [ "$SKIP_BASELINE" = false ]; then

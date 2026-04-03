@@ -1,45 +1,39 @@
 #!/usr/bin/env bash
-# Setup script for g6.48xlarge EC2 instance (8x NVIDIA L4, Ubuntu)
+# Setup script for g6.48xlarge EC2 instance (8x NVIDIA L4)
+# Assumes conda is available and NVIDIA drivers are pre-installed.
 # Run as: bash scripts/setup_ec2.sh
 set -euo pipefail
 
+ENV_NAME="qnt"
+
 echo "=== Qwen3-32B Boundary V Quantization Experiment - EC2 Setup ==="
 
-# --- System packages ---
-echo "[1/6] Installing system dependencies..."
-sudo apt-get update -qq
-sudo apt-get install -y -qq git curl wget htop nvtop tmux python3-pip python3-venv
-
-# --- NVIDIA drivers (if not already installed on Deep Learning AMI) ---
-echo "[2/6] Checking NVIDIA drivers..."
+# --- Check NVIDIA drivers ---
+echo "[1/4] Checking NVIDIA drivers..."
 if ! command -v nvidia-smi &>/dev/null; then
-    echo "NVIDIA drivers not found. If using Deep Learning AMI, they should be pre-installed."
-    echo "For a fresh Ubuntu instance, install drivers manually:"
-    echo "  sudo apt-get install -y nvidia-driver-550 nvidia-utils-550"
+    echo "ERROR: nvidia-smi not found. Install NVIDIA drivers first."
     exit 1
 fi
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 echo ""
 
-# --- Python environment ---
-echo "[3/6] Setting up Python virtual environment..."
-python3 -m venv venv
-source venv/bin/activate
+# --- Create conda environment ---
+echo "[2/4] Creating conda environment '${ENV_NAME}'..."
+conda create -n "$ENV_NAME" python=3.11 -y
+eval "$(conda shell.bash hook)"
+conda activate "$ENV_NAME"
 
-# --- Install PyTorch with CUDA ---
-echo "[4/6] Installing PyTorch with CUDA support..."
+# --- Install PyTorch with CUDA + project deps ---
+echo "[3/4] Installing PyTorch + project dependencies..."
 pip install --upgrade pip setuptools wheel
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-
-# --- Install project dependencies ---
-echo "[5/6] Installing project dependencies..."
 pip install -r requirements.txt
 
 # Enable fast HuggingFace downloads
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
 # --- Verify GPU setup ---
-echo "[6/6] Verifying GPU setup..."
+echo "[4/4] Verifying GPU setup..."
 python3 -c "
 import torch
 print(f'PyTorch version: {torch.__version__}')
@@ -53,5 +47,5 @@ for i in range(torch.cuda.device_count()):
 
 echo ""
 echo "=== Setup complete ==="
-echo "Activate the environment with: source venv/bin/activate"
+echo "Activate with: conda activate ${ENV_NAME}"
 echo "Next: bash scripts/download_model.sh"
