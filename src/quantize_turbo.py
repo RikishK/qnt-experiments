@@ -88,18 +88,15 @@ def _next_power_of_2(n: int) -> int:
 def _apply_fast_hadamard(x: torch.Tensor) -> torch.Tensor:
     """Apply the Walsh-Hadamard transform along the last dimension in O(n log n).
 
-    Input x has shape (..., n) where n is a power of 2. The transform is
-    applied in-place via the butterfly algorithm and normalized by 1/sqrt(n).
+    Input x has shape (..., n) where n is a power of 2. The transform uses
+    the butterfly algorithm and is normalized by 1/sqrt(n).
     """
     n = x.shape[-1]
     h = 1
     while h < n:
-        # Butterfly: pairs at stride h
-        x_even = x[..., 0::2 * h]  # won't work for strided in-place
-        # Use reshape-based approach instead
         x = x.reshape(*x.shape[:-1], n // (2 * h), 2, h)
-        a = x[..., 0, :]  # even
-        b = x[..., 1, :]  # odd
+        a = x[..., 0, :].clone()
+        b = x[..., 1, :].clone()
         x[..., 0, :] = a + b
         x[..., 1, :] = a - b
         x = x.reshape(*x.shape[:-3], n)
@@ -142,13 +139,18 @@ def quantize_rotation_int4(
     signs = torch.randint(0, 2, (cols,), generator=rng).float() * 2 - 1
     signs = signs.to(weight.dtype).to(weight.device)
 
+    # Work in float32 to avoid FP16 overflow in butterfly additions.
+    # Intermediate Hadamard values can be up to sqrt(n) * max(weight) before
+    # normalization, which exceeds FP16 range for n >= 4096.
+    orig_dtype = weight.dtype
+    weight = weight.float()
+    signs = signs.float()
+
     # Forward transform: sign flip then Hadamard
     rotated = weight * signs.unsqueeze(0)
     rotated = _apply_fast_hadamard(rotated)
 
     # INT4 group-wise quantization on the rotated weights
-    # After rotation, the distribution is much more uniform (no outliers),
-    # so group-wise INT4 is more effective
     if cols % group_size != 0:
         pad_g = group_size - (cols % group_size)
         rotated = torch.nn.functional.pad(rotated, (0, pad_g))
@@ -166,7 +168,7 @@ def quantize_rotation_int4(
     restored = _apply_fast_hadamard(dequantized)
     restored = restored * signs.unsqueeze(0)
 
-    return restored[:, :orig_cols].to(weight.dtype)
+    return restored[:, :orig_cols].to(orig_dtype)
 
 
 def quantize_int8(weight: torch.Tensor) -> torch.Tensor:
