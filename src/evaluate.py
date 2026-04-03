@@ -1,14 +1,15 @@
 """
 HumanEval and MBPP evaluation harness.
 
-Generates code completions via vLLM and executes them against test cases
+Generates code completions via vLLM with Qwen3 chat template
+(enable_thinking=False) and executes them against test cases
 to compute pass@1 scores. Also tracks exact match rate vs a baseline.
 """
 
 import json
 import logging
 import os
-import signal
+import re
 import subprocess
 import tempfile
 import time
@@ -95,6 +96,32 @@ def _execute_code_safely(code: str, test_code: str, timeout: int = EXECUTION_TIM
         os.unlink(tmp_path)
 
 
+def _extract_code_from_response(response: str) -> str:
+    """
+    Extract Python code from model response.
+
+    Handles:
+    - Code wrapped in ```python ... ``` blocks
+    - Code wrapped in ``` ... ``` blocks
+    - Raw code (no markdown fencing)
+    """
+    # Try to find ```python ... ``` block first
+    pattern = r"```python\s*\n(.*?)```"
+    matches = re.findall(pattern, response, re.DOTALL)
+    if matches:
+        return matches[0].strip()
+
+    # Try generic ``` ... ``` block
+    pattern = r"```\s*\n(.*?)```"
+    matches = re.findall(pattern, response, re.DOTALL)
+    if matches:
+        return matches[0].strip()
+
+    # No code blocks found -- return the raw response
+    # (strip leading/trailing whitespace and common preamble)
+    return response.strip()
+
+
 # ---------------------------------------------------------------------------
 # HumanEval
 # ---------------------------------------------------------------------------
@@ -114,18 +141,32 @@ def load_humaneval(data_dir: str = "./data/humaneval") -> list[dict]:
     return problems
 
 
+def _build_humaneval_prompt(problem: dict) -> str:
+    """
+    Build a chat-style prompt for HumanEval.
+
+    Includes the function signature and asks the model to complete it.
+    """
+    return (
+        f"Complete the following Python function. "
+        f"Return ONLY the complete function implementation inside a "
+        f"```python``` code block. Do not include any explanation.\n\n"
+        f"{problem['prompt']}"
+    )
+
+
 def eval_humaneval(
     engine: VLLMInference,
     config_name: str,
     data_dir: str = "./data/humaneval",
-    max_tokens: int = 512,
+    max_tokens: int = 1024,
 ) -> BenchmarkResult:
     """Run HumanEval evaluation."""
     problems = load_humaneval(data_dir)
     logger.info(f"Running HumanEval: {len(problems)} problems")
 
-    # Generate completions
-    prompts = [p["prompt"] for p in problems]
+    # Generate completions using chat-formatted prompts
+    prompts = [_build_humaneval_prompt(p) for p in problems]
     start = time.time()
     gen_results = engine.generate(prompts, max_tokens=max_tokens)
     gen_time = time.time() - start
@@ -142,8 +183,15 @@ def eval_humaneval(
     for problem, gen in tqdm(
         zip(problems, gen_results), total=len(problems), desc="Executing HumanEval"
     ):
-        # Combine prompt + completion for full function
-        full_code = problem["prompt"] + gen.output
+        # Extract code from model response
+        raw_code = _extract_code_from_response(gen.output)
+
+        # The model should return the full function. If it only returned
+        # the body, prepend the signature.
+        if not raw_code.startswith("def "):
+            full_code = problem["prompt"] + raw_code
+        else:
+            full_code = raw_code
 
         # Build test harness
         test_code = problem["test"] + f"\ncheck({problem['entry_point']})\n"
@@ -153,7 +201,7 @@ def eval_humaneval(
         eval_r = EvalResult(
             task_id=problem["task_id"],
             prompt=problem["prompt"],
-            generated_code=gen.output,
+            generated_code=raw_code,
             passed=passed,
             error=error,
         )
@@ -190,9 +238,18 @@ def load_mbpp(data_dir: str = "./data/mbpp") -> list[dict]:
 
 
 def _build_mbpp_prompt(problem: dict) -> str:
-    """Build a code generation prompt for an MBPP problem."""
+    """
+    Build a chat-style prompt for an MBPP problem.
+
+    Includes the task description and example test cases.
+    """
+    test_examples = "\n".join(problem["test_list"][:2])  # Show first 2 tests
     return (
-        f'"""\n{problem["prompt"]}\n"""\n'
+        f"Write a Python function to solve the following task. "
+        f"Return ONLY the function implementation inside a "
+        f"```python``` code block. Do not include any explanation.\n\n"
+        f"Task: {problem['prompt']}\n\n"
+        f"Example test cases:\n{test_examples}"
     )
 
 
@@ -200,13 +257,13 @@ def eval_mbpp(
     engine: VLLMInference,
     config_name: str,
     data_dir: str = "./data/mbpp",
-    max_tokens: int = 512,
+    max_tokens: int = 1024,
 ) -> BenchmarkResult:
     """Run MBPP evaluation."""
     problems = load_mbpp(data_dir)
     logger.info(f"Running MBPP: {len(problems)} problems")
 
-    # Generate completions
+    # Generate completions using chat-formatted prompts
     prompts = [_build_mbpp_prompt(p) for p in problems]
     start = time.time()
     gen_results = engine.generate(prompts, max_tokens=max_tokens)
@@ -224,15 +281,15 @@ def eval_mbpp(
     for problem, gen in tqdm(
         zip(problems, gen_results), total=len(problems), desc="Executing MBPP"
     ):
-        full_code = gen.output
+        raw_code = _extract_code_from_response(gen.output)
         test_code = "\n".join(problem["test_list"])
 
-        passed, error = _execute_code_safely(full_code, test_code)
+        passed, error = _execute_code_safely(raw_code, test_code)
 
         eval_r = EvalResult(
             task_id=problem["task_id"],
             prompt=_build_mbpp_prompt(problem),
-            generated_code=gen.output,
+            generated_code=raw_code,
             passed=passed,
             error=error,
         )
@@ -260,12 +317,12 @@ def compute_exact_match(
 ) -> float:
     """
     Compute exact match rate: fraction of problems where the quantized
-    model produces character-identical output to the baseline.
+    model produces character-identical code to the baseline.
     """
     assert len(baseline_results) == len(quantized_results)
     matches = sum(
         1 for b, q in zip(baseline_results, quantized_results)
-        if b.generated_code == q.generated_code
+        if b.generated_code.strip() == q.generated_code.strip()
     )
     return matches / len(baseline_results)
 
