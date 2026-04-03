@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Results (keep summaries, ignore raw data)
+results/*.jsonl
+results/*.json
+results/raw/
+!results/.gitkeep
+!results/summary_*.md
+
+# Models (never commit)
+models/
+*.bin
+*.safetensors
+*.gguf
+*.pt
+*.pth
+
+# HuggingFace cache
+.cache/
+
+# Environment
+.env
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenCode
+.opencode/
